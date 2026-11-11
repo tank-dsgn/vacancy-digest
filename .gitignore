@@ -1,0 +1,7 @@
+__pycache__/
+.DS_Store
+
+# Личное: критерии, список компаний и готовые выдачи в репозиторий не идут
+companies.txt
+digest.md
+vacancies.html
