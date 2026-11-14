@@ -36,9 +36,10 @@ SOURCES = [
     ("hh.ru", CIS_AREAS, {"work_format": "REMOTE"}, "СНГ, удалёнка"),
 ]
 ANALYSIS = HERE / "analysis.json"
+COMPANY_CACHE = HERE / "employers.json"  # public employer pages only; contact statuses never go here
 FEW_RESPONSES = 50
 TITLE_OK = re.compile(r"дизайн|design|\bux\b|\bui\b", re.I)
-TITLE_SKIP = re.compile(r"графическ|graphic|моушн|motion|3d|интерьер|interior|ландшафт|одежд|мебел|полиграф|smm|упаков|ювелир|флорист|парикмах|иллюстрат|архитект|разработчик|developer|engineer|инженер|аналитик|analyst|администр|презентац|продав|консультант|карточ|wildberries|ozon|маркетплейс|технический дизайн|реклам|баннер|принт|оформител|организацион|editor|head of frontend|оператор|фотограф|печатн|level design|геймдизайн|game design|нарратив|редактор|копирайт|writer|менеджер|manager|художник|artist", re.I)
+TITLE_SKIP = re.compile(r"графическ|graphic|моушн|motion|3d|интерьер|interior|ландшафт|одежд|мебел|полиграф|smm|упаков|ювелир|флорист|парикмах|иллюстрат|архитект|разработчик|developer|engineer|инженер|аналитик|analyst|администр|презентац|продав|консультант|карточ|wildberries|ozon|маркетплейс|технический дизайн|реклам|баннер|принт|оформител|организацион|editor|head of frontend|оператор|фотограф|печатн|level design|геймдизайн|game design|нарратив|редактор|копирайт|writer|менеджер|manager|художник|artist|econom|экономик", re.I)
 
 MIN_USD = int(os.environ.get("MIN_USD") or 1000)  # salary floor, $ net
 HOME_CITY = os.environ.get("HOME_CITY", "")  # home city; unset means an office anywhere is fine
@@ -306,6 +307,71 @@ def assess_text(r, desc):
     return flags, doms, duties(desc)
 
 
+# --- company research (hh / rabota.by employer pages) ---
+KIND = [
+    ("кадровое агентство", r"кадров\w* агентств|рекрутинг|рекрутингов|recruit|подбор\w* персонал|staffing|аутстаф"),
+    ("агентство/студия", r"(digital|креативн\w*|рекламн\w*|маркетингов\w*|брендингов\w*|интернет)[- ]агентств|"
+                          r"(дизайн|digital|веб|web|креативн\w*)[- ]студи|(digital|creative|design|branding|marketing) (studio|agency)"),
+    ("аутсорс", r"аутсорс|outsourc|заказн\w* разработ|разработк\w* (ПО |программного обеспечения )?(под ключ|на заказ|для клиентов)|software development company"),
+    ("продукт", r"продуктов\w* (компани|IT|ИТ)|собственн\w* (продукт|платформ|сервис)|свой продукт|наш\w* продукт|product company"),
+]
+
+
+def company_info(eid):
+    """What the employer does, taken from its public rabota.by / hh.ru page."""
+    page = fetch(f"https://rabota.by/employer/{eid}")
+    m = re.search(r'id="HH-Lux-InitialState"[^>]*>(.*?)</template>', page, re.S)
+    d = json.loads(html.unescape(m.group(1)))
+    ei = d.get("employerInfo") or {}
+    rating = (d.get("employerOrganizationSchema") or {}).get("aggregateRating") or {}
+    return {
+        "desc": read_text(ei.get("description") or "").strip()[:1500], "site": (ei.get("site") or {}).get("href") or "",
+        "country": ei.get("employerCountryCode") or "", "it": bool(ei.get("accreditedITEmployer")),
+        "rating": rating.get("ratingValue"), "reviews": rating.get("ratingCount"),
+    }
+
+
+def co_line(c):
+    """One line: kind, rating, accreditation, first meaningful sentence of the description."""
+    if not c:
+        return ""
+    desc = c.get("desc", "")
+    kind = next((k for k, rx in KIND if re.search(rx, desc, re.I)), "")
+    what = next((x for x in re.split(r"(?<=[.!?])\s+", desc) if len(x.split()) >= 5), "")
+    if len(what) > 80:
+        what = what[:80].rsplit(" ", 1)[0] + "…"
+    bits = [kind] if kind else []
+    if c.get("rating") and (c.get("reviews") or 0) >= 5:
+        bits.append(f"★{c['rating']} ({c['reviews']} отз.)")
+    if c.get("it"):
+        bits.append("аккредитованная IT")
+    head = " · ".join(bits)
+    return (head + (": " if head and what else "") + what).strip()
+
+
+def read_companies(found):
+    """Looks up employers of vacancies that passed the filters. Cached for 30 days."""
+    cache = json.loads(COMPANY_CACHE.read_text()) if COMPANY_CACHE.exists() else {}
+    today = dt.date.today()
+    fresh = 0
+    for r in found.values():
+        eid = r.get("employer_id")
+        if r["fit"] == "bad" or not eid:
+            continue
+        c = cache.get(str(eid))
+        if not c or "desc" not in c or (today - dt.date.fromisoformat(c["date"])).days > 30:
+            try:
+                c = company_info(eid) | {"date": today.isoformat()}
+                cache[str(eid)] = c
+                fresh += 1
+                time.sleep(0.4)
+            except Exception:
+                continue
+        r["co"] = co_line(c)
+    COMPANY_CACHE.write_text(json.dumps(cache, ensure_ascii=False))
+    return fresh
+
+
 def read_all(found):
     """Reads the text of every vacancy that passed the basic checks. Results are cached by id."""
     cache = json.loads(ANALYSIS.read_text()) if ANALYSIS.exists() else {}
@@ -375,7 +441,7 @@ def normalize(v, region, rates):
     flags += salary_flags(money_, open_top=not hi)
     reposted = bool(created and pub and (pub - created).days >= 2)
     return {
-        "id": str(v["vacancyId"]), "name": name, "company": company,
+        "id": str(v["vacancyId"]), "name": name, "company": company, "employer_id": v["company"].get("id"),
         "url": v.get("links", {}).get("desktop") or f"https://rabota.by/vacancy/{v['vacancyId']}",
         "salary": salary, "pay": money_, "pub": pub.isoformat(), "created": created.isoformat() if created else "",
         "reposted": reposted, "city": city, "region": region, "source": v.get("displayHost") or ("rabota.by" if region == "Беларусь" else "hh.ru"),
@@ -679,14 +745,18 @@ def telegram_digest(st, ins, picks, new_ok, errors):
             tags.append("поднята, создана " + dt.date.fromisoformat(r["created"][:10]).strftime("%d.%m"))
         out = [f'{n}. {"🆕 " if r.get("new") else ""}<b><a href="{e(r["url"])}">{e(r["name"])}</a></b> — {e(r["company"])}',
                "📍 " + e(where) if where else "", e(" · ".join(meta))]
+        if r.get("co"):
+            out.insert(1, "🏢 " + e(r["co"]))
         if doms:
-            out.append("🎯 Твоё: " + e(", ".join(doms)))
+            out.append("🎯 " + e(", ".join(doms)))
         plus = [f[1] for f in r["flags"] if f[1] in ("мало откликов", "есть вилка")]
         if plus:
             out.append("✅ " + e(", ".join(plus)))
-        d = r.get("duty") or ""
+        d = (r.get("duty") or "").rstrip("…")
+        if len(d) > 100:
+            d = d[:100].rsplit(" ", 1)[0] + "…"
         if d:
-            out.append("<i>Что делать:</i> " + e(d))
+            out.append("🛠 " + e(d))
         if tags:
             out.append("⚠️ " + e(", ".join(tags)))
         return "\n".join(x for x in out if x)
@@ -721,7 +791,7 @@ def telegram_digest(st, ins, picks, new_ok, errors):
         parts.append("\n".join(tail).strip("\n"))
         return "\n\n".join(parts)
     text = build()
-    while len(text) > 4000:  # Telegram limit is 4096: drop the last entries
+    while len(html.unescape(re.sub(r"<[^>]+>", "", text))) > 4000:  # Telegram counts visible text, not markup  # Telegram limit is 4096: drop the last entries
         for b in reversed(blocks):
             if len(b) > 2:
                 b.pop()
@@ -799,6 +869,7 @@ def main():
     found = dict(uniq.values())
     mark_companies(found, load_companies())
     n = read_all(found)
+    print(f"  looked up {read_companies(found)} new companies", file=sys.stderr)
     for r in found.values():
         if r["responses"] is not None and r["responses"] < FEW_RESPONSES:
             r["flags"].append(("good", "мало откликов"))
@@ -960,7 +1031,7 @@ function render(){
       const meta=[r.formats.join(", "),r.city,r.exp&&"опыт "+r.exp,r.emp&&r.emp!=="полная"?r.emp:"",r.responses?r.responses+" откликов":"",r.source].filter(Boolean).join(" · ");
       h+=`<tr class="${r.fit}"><td class="date"><b>${fmt(r.pub)}</b></td>
         <td class="role"><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.name)}</a><div class="meta">${esc(meta)}</div><div class="tags">${tags.join("")}</div></td>
-        <td class="co">${esc(r.company)}${r.salary?`<div class="sal">${esc(r.salary)}</div>`:""}</td></tr>`;
+        <td class="co">${esc(r.company)}${r.co?`<div class="meta">${esc(r.co)}</div>`:""}${r.salary?`<div class="sal">${esc(r.salary)}</div>`:""}</td></tr>`;
     });
     h+="</tbody></table>";
   });

@@ -68,10 +68,10 @@ jobs:
           git config user.name "vacancy-digest"
           git config user.email "actions@users.noreply.github.com"
           if [ "${{ steps.run.outputs.rc }}" = "0" ]; then
-            git add seen.json history.json analysis.json last_sent.txt
+            git add seen.json history.json analysis.json employers.json last_sent.txt
             msg="Digest $(TZ=Europe/Minsk date +%Y-%m-%d)"
           else
-            git add analysis.json
+            git add analysis.json employers.json
             msg="Cache only, send failed $(TZ=Europe/Minsk date +%Y-%m-%d)"
           fi
           git diff --cached --quiet || git commit -m "$msg"
