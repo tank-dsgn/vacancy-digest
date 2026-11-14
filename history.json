@@ -109,20 +109,20 @@
  },
  {
   "date": "2026-11-14",
-  "total": 154,
-  "ok": 69,
-  "new": 15,
-  "new_ok": 4,
-  "week": 79,
+  "total": 149,
+  "ok": 68,
+  "new": 0,
+  "new_ok": 0,
+  "week": 78,
   "week_fresh": 50,
   "reposted_share": 25,
-  "salary_share": 31,
-  "mid_median": 1200,
+  "salary_share": 30,
+  "mid_median": 1183,
   "mid_p25": 950,
-  "mid_p75": 1800,
-  "mid_n": 39,
-  "remote_share": 24,
+  "mid_p75": 1583,
+  "mid_n": 33,
+  "remote_share": 21,
   "eng_share": 10,
-  "resp_median": 628
+  "resp_median": 642
  }
 ]
