@@ -14,7 +14,7 @@ Usage:  python3 generate.py              (last 30 days)
         python3 generate.py --days 14
         python3 generate.py --telegram   (send to Telegram)
 """
-import argparse, datetime as dt, html, json, os, re, sys, time, urllib.parse, urllib.request
+import argparse, subprocess, datetime as dt, html, json, os, re, sys, time, urllib.parse, urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -640,6 +640,126 @@ def write_digest(st, ins, picks, new_ok, errors):
     DIGEST.write_text("\n".join(L) + "\n", encoding="utf-8")
 
 
+# --- marks from Telegram (buttons and text replies), stored encrypted in the public repo ---
+STATE_ENC = HERE / "state.enc"
+STATE_KEY_FILE = Path.home() / "Library/Application Support/vacancy-digest/state_key"
+ACTIONS = {"a": "откликнулся", "s": "мимо", "r": "отказ"}
+REPLY = re.compile(r"^\s*(\d{1,2})\s*[.:)-]?\s*(отклик\w*|откликнулся|мимо|не\s*интерес\w*|скип|отказ\w*|сброс|отмен\w*)", re.I | re.M)
+
+
+def state_key():
+    import os
+    if os.environ.get("STATE_KEY"):
+        return os.environ["STATE_KEY"]
+    return STATE_KEY_FILE.read_text().strip() if STATE_KEY_FILE.exists() else None
+
+
+def _openssl(args, data, key):
+    import os
+    env = dict(os.environ, STATE_KEY=key)
+    return subprocess.run(["openssl", "enc", *args, "-aes-256-cbc", "-pbkdf2", "-iter", "100000", "-md", "sha256",
+                           "-pass", "env:STATE_KEY"], input=data, capture_output=True, env=env, check=True).stdout
+
+
+def load_state():
+    key = state_key()
+    empty = {"offset": 0, "last": [], "shown": {}, "marks": {}}
+    if not key or not STATE_ENC.exists():
+        return empty
+    return empty | json.loads(_openssl(["-d"], STATE_ENC.read_bytes(), key))
+
+
+def save_state(state):
+    key = state_key()
+    if key:
+        STATE_ENC.write_bytes(_openssl(["-salt"], json.dumps(state, ensure_ascii=False).encode(), key))
+
+
+def tg_api(conf, method, **params):
+    req = urllib.request.Request(f"https://api.telegram.org/bot{conf['token']}/{method}",
+                                 data=json.dumps(params).encode(), headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=40) as r:
+        return json.loads(r.read())["result"]
+
+
+def poll_marks(conf, state):
+    """Reads button presses and replies since the last run. Telegram keeps them for 24 hours."""
+    ups = tg_api(conf, "getUpdates", offset=state["offset"], timeout=0, allowed_updates=["message", "callback_query"])
+    done = []
+    today = dt.date.today().strftime("%d.%m")
+    for u in ups:
+        state["offset"] = u["update_id"] + 1
+        cq, msg = u.get("callback_query"), u.get("message")
+        chat = ((cq or {}).get("message") or msg or {}).get("chat", {}).get("id")
+        if str(chat) != str(conf["chat_id"]):
+            continue  # only the owner's chat counts
+        pairs = []
+        if cq and (cq.get("data") or "").startswith("m|"):
+            _, act, vid = cq["data"].split("|", 2)
+            pairs.append((act, vid))
+            try:
+                tg_api(conf, "answerCallbackQuery", callback_query_id=cq["id"], text="Принято, запишу при проверке")
+            except Exception:
+                pass  # too late to answer; the mark still counts
+        elif msg and msg.get("text"):
+            for m in REPLY.finditer(msg["text"]):
+                n, word = int(m.group(1)), m.group(2).lower()
+                act = "a" if word.startswith("отклик") else "r" if word.startswith("отказ") else \
+                      "x" if word.startswith(("сброс", "отмен")) else "s"
+                if 0 < n <= len(state["last"]):
+                    pairs.append((act, state["last"][n - 1]))
+        for act, vid in pairs:
+            info = state["shown"].get(vid)
+            if not info:
+                continue
+            if act == "x":
+                state["marks"].pop(vid, None)
+                done.append(f"{info['company']} — {info['name']}: отметка снята")
+            else:
+                state["marks"][vid] = {"act": act, "company": info["company"], "name": info["name"], "date": today}
+                done.append(f"{info['company']} — {info['name']}: {ACTIONS[act]}")
+    if done:
+        tg_send("Записал:\n" + "\n".join("• " + html.escape(x) for x in done) +
+                "\n\nУчту в утренней сводке. Ошибся — ответь «номер сброс».", conf)
+    return len(done)
+
+
+def apply_marks(found, state):
+    """Company-level: applied and rejected. Vacancy-level: skip."""
+    by_company = {}
+    for vid, m in state["marks"].items():
+        if m["act"] in ("a", "r"):
+            by_company[m["company"].lower()] = m
+    for vid, r in found.items():
+        m = state["marks"].get(vid)
+        if m and m["act"] == "s":
+            r["flags"].insert(0, ("bad", "мимо"))
+            r["fit"] = "bad"
+            continue
+        m = by_company.get(r["company"].lower())
+        if m and not r.get("status"):
+            label = ("откликнулся " if m["act"] == "a" else "отказ ") + m["date"]
+            r["status"] = label
+            r["flags"].insert(0, ("bad" if m["act"] == "r" else "plain", label))
+            r["fit"] = fit_of(r["flags"])
+
+
+def remember_shown(state, shown):
+    today = dt.date.today().isoformat()
+    state["last"] = [r["id"] for r in shown]
+    for r in shown:
+        state["shown"][r["id"]] = {"company": r["company"], "name": r["name"], "date": today}
+    cutoff = (dt.date.today() - dt.timedelta(days=60)).isoformat()
+    state["shown"] = {k: v for k, v in state["shown"].items() if v["date"] >= cutoff or k in state["marks"]}
+
+
+def keyboard(shown):
+    rows = [[{"text": f"{n} ✓ откликнулся", "callback_data": f"m|a|{r['id']}"},
+             {"text": "✕ мимо", "callback_data": f"m|s|{r['id']}"},
+             {"text": "отказ", "callback_data": f"m|r|{r['id']}"}] for n, r in enumerate(shown, 1)]
+    return {"inline_keyboard": rows}
+
+
 def tg_conf():
     """In the cloud: from env vars (GitHub secrets); on the Mac: from a local file."""
     import os
@@ -666,10 +786,12 @@ def tg_send_file(path, caption, conf):
         return json.loads(r.read())
 
 
-def tg_send(text, conf=None):
+def tg_send(text, conf=None, markup=None):
     conf = conf or tg_conf()
-    body = urllib.parse.urlencode({"chat_id": conf["chat_id"], "text": text, "parse_mode": "HTML",
-                                   "disable_web_page_preview": "true"}).encode()
+    fields = {"chat_id": conf["chat_id"], "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true"}
+    if markup:
+        fields["reply_markup"] = json.dumps(markup)
+    body = urllib.parse.urlencode(fields).encode()
     req = urllib.request.Request(f"https://api.telegram.org/bot{conf['token']}/sendMessage", data=body)
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read())
@@ -774,6 +896,7 @@ def telegram_digest(st, ins, picks, new_ok, errors):
             for r in group:
                 n += 1
                 blocks[-1].append(card(n, r))
+    ordered = by + other
     if st["new_ok"] > shown_new:
         blocks.append([f"…ещё {st['new_ok'] - shown_new} новых подходящих — в файле", None])
     tail = []
@@ -801,14 +924,29 @@ def telegram_digest(st, ins, picks, new_ok, errors):
         else:
             break
         text = build()
-    return text
+    kept = sum(len(b) - 2 for b in blocks if b[0] == "")
+    return text, ordered[:kept]
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--telegram", action="store_true", help="отправить сводку в Telegram")
+    ap.add_argument("--poll", action="store_true", help="only read Telegram marks (buttons, replies) and save them")
     args = ap.parse_args()
+    state = load_state()
+    if args.poll or args.telegram:
+        conf = tg_conf()
+        if conf and state_key():
+            try:
+                print(f"  marks from Telegram: {poll_marks(conf, state)}", file=sys.stderr)
+                save_state(state)
+            except Exception as ex:
+                print("  reading Telegram marks failed:", ex, file=sys.stderr)
+        elif not state_key():
+            print("  no STATE_KEY: buttons and marks are off", file=sys.stderr)
+    if args.poll:
+        return
     rates, rate_note = usd_rates()
     found, errors = {}, []
     for host, area, extra, region in SOURCES:
@@ -868,6 +1006,7 @@ def main():
         uniq.setdefault((r["company"].lower(), r["name"].lower().strip()), (k, r))
     found = dict(uniq.values())
     mark_companies(found, load_companies())
+    apply_marks(found, state)
     n = read_all(found)
     print(f"  looked up {read_companies(found)} new companies", file=sys.stderr)
     for r in found.values():
@@ -899,7 +1038,11 @@ def main():
             print("  Telegram send failed: not configured (no TELEGRAM_TOKEN/TELEGRAM_CHAT_ID)", file=sys.stderr)
             sys.exit(2)
         try:
-            tg_send(telegram_digest(st, ins, picks, new_ok, errors), conf)
+            text, shown = telegram_digest(st, ins, picks, new_ok, errors)
+            tg_send(text, conf, keyboard(shown) if state_key() else None)
+            if state_key():
+                remember_shown(state, shown)
+                save_state(state)
             tg_send_file(OUT, f"Все вакансии на {dt.date.today():%d.%m}", conf)
             print("  digest sent to Telegram", file=sys.stderr)
         except Exception as ex:

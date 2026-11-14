@@ -51,6 +51,7 @@ jobs:
           MY_TARGET: ${{ secrets.MY_TARGET }}
           COMPANIES: ${{ secrets.COMPANIES }}
           HOME_CITY: ${{ secrets.HOME_CITY }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
           TZ: Europe/Minsk
         id: run
         run: |
@@ -69,9 +70,11 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           if [ "${{ steps.run.outputs.rc }}" = "0" ]; then
             git add seen.json history.json analysis.json employers.json last_sent.txt
+            if [ -f state.enc ]; then git add state.enc; fi
             msg="Digest $(TZ=Europe/Minsk date +%Y-%m-%d)"
           else
             git add analysis.json employers.json
+            if [ -f state.enc ]; then git add state.enc; fi
             msg="Cache only, send failed $(TZ=Europe/Minsk date +%Y-%m-%d)"
           fi
           git diff --cached --quiet || git commit -m "$msg"
