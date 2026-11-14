@@ -821,21 +821,24 @@ def main():
     rows = sorted(found.values(), key=lambda v: v["pub"], reverse=True)
     st, ins, picks, hist, new_ok = analyze(rows, errors)
     write_digest(st, ins, picks, new_ok, errors)
-    if args.telegram:
-        conf = tg_conf()
-        if not conf:
-            print("  Telegram not configured (no TELEGRAM_TOKEN/TELEGRAM_CHAT_ID), skipping", file=sys.stderr)
-        else:
-            try:
-                tg_send(telegram_digest(st, ins, picks, new_ok, errors), conf)
-                tg_send_file(OUT, f"Все вакансии на {dt.date.today():%d.%m}", conf)
-                print("  digest sent to Telegram", file=sys.stderr)
-            except Exception as ex:
-                print("  Telegram send failed:", ex, file=sys.stderr)
+    # the page must exist before it is sent as a file
     OUT.write_text(render(rows, rate_note, errors, args.days, ins, picks, hist), encoding="utf-8")
     print(f"Done: {len(rows)} vacancies, {sum(v['new'] for v in rows)} new -> {OUT}", file=sys.stderr)
     for e in errors:
         print("  error:", e, file=sys.stderr)
+    if args.telegram:
+        conf = tg_conf()
+        if not conf:
+            print("  Telegram send failed: not configured (no TELEGRAM_TOKEN/TELEGRAM_CHAT_ID)", file=sys.stderr)
+            sys.exit(2)
+        try:
+            tg_send(telegram_digest(st, ins, picks, new_ok, errors), conf)
+            tg_send_file(OUT, f"Все вакансии на {dt.date.today():%d.%m}", conf)
+            print("  digest sent to Telegram", file=sys.stderr)
+        except Exception as ex:
+            # non-zero exit: the workflow does not mark the day as sent, so a fallback run retries
+            print("  Telegram send failed:", ex, file=sys.stderr)
+            sys.exit(2)
 
 
 def render(rows, rate_note, errors, days, ins, picks, hist):
