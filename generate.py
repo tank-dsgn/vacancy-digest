@@ -701,8 +701,8 @@ def poll_marks(conf, state):
                 tg_api(conf, "answerCallbackQuery", callback_query_id=cq["id"], text="Принято, запишу при проверке")
             except Exception:
                 pass  # too late to answer; the mark still counts
-        elif msg and (msg.get("text") or "").startswith("/start "):
-            payload = msg["text"].split(" ", 1)[1].strip()
+        elif msg and (msg.get("text") or "").split(" ")[0] == "/start":
+            payload = (msg["text"].split(" ", 1)[1:] or [""])[0].strip()
             if re.fullmatch(r"[asr]_[A-Za-z0-9-]+", payload):
                 pairs.append((payload[0], payload[2:]))
             try:  # keep the chat clean: bots may delete incoming messages in private chats
