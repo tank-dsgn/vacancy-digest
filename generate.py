@@ -701,6 +701,14 @@ def poll_marks(conf, state):
                 tg_api(conf, "answerCallbackQuery", callback_query_id=cq["id"], text="Принято, запишу при проверке")
             except Exception:
                 pass  # too late to answer; the mark still counts
+        elif msg and (msg.get("text") or "").startswith("/start "):
+            payload = msg["text"].split(" ", 1)[1].strip()
+            if re.fullmatch(r"[asr]_[A-Za-z0-9-]+", payload):
+                pairs.append((payload[0], payload[2:]))
+            try:  # keep the chat clean: bots may delete incoming messages in private chats
+                tg_api(conf, "deleteMessage", chat_id=chat, message_id=msg["message_id"])
+            except Exception:
+                pass
         elif msg and msg.get("text"):
             for m in REPLY.finditer(msg["text"]):
                 n, word = int(m.group(1)), m.group(2).lower()
@@ -856,7 +864,7 @@ def duties(desc, limit=120):
     return ""
 
 
-def telegram_digest(st, ins, picks, new_ok, errors):
+def telegram_digest(st, ins, picks, new_ok, errors, bot=None):
     e = html.escape
     def card(n, r):
         where = " · ".join(x for x in [r["city"], " или ".join(r["formats"])] if x)
@@ -884,6 +892,9 @@ def telegram_digest(st, ins, picks, new_ok, errors):
             out.append("🛠 " + e(d))
         if tags:
             out.append("⚠️ " + e(", ".join(tags)))
+        if bot:  # links open the bot with a /start payload; the hourly reader records it and deletes the message
+            link = lambda act, label: f'<a href="https://t.me/{bot}?start={act}_{r["id"]}">{label}</a>'
+            out.append(" · ".join([link("a", "✓ отклик"), link("s", "✕ мимо"), link("r", "отказ")]))
         return "\n".join(x for x in out if x)
 
     by = [r for r in picks if r["source"] == "rabota.by"][:5]
@@ -1041,8 +1052,9 @@ def main():
             print("  Telegram send failed: not configured (no TELEGRAM_TOKEN/TELEGRAM_CHAT_ID)", file=sys.stderr)
             sys.exit(2)
         try:
-            text, shown = telegram_digest(st, ins, picks, new_ok, errors)
-            tg_send(text, conf, keyboard(shown) if state_key() else None)
+            bot = tg_api(conf, "getMe")["username"] if state_key() else None
+            text, shown = telegram_digest(st, ins, picks, new_ok, errors, bot)
+            tg_send(text, conf)
             if state_key():
                 remember_shown(state, shown)
                 save_state(state)
