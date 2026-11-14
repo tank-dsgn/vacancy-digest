@@ -725,22 +725,25 @@ def poll_marks(conf, state):
 
 
 def apply_marks(found, state):
-    """Company-level: applied and rejected. Vacancy-level: skip."""
+    """A mark belongs to one vacancy. Other vacancies of the same company stay in the digest with a note:
+    a rejection for one role says little about another, but it is worth knowing before applying."""
     by_company = {}
     for vid, m in state["marks"].items():
         if m["act"] in ("a", "r"):
-            by_company[m["company"].lower()] = m
+            by_company.setdefault(m["company"].lower(), []).append((vid, m))
     for vid, r in found.items():
         m = state["marks"].get(vid)
-        if m and m["act"] == "s":
-            r["flags"].insert(0, ("bad", "мимо"))
-            r["fit"] = "bad"
+        if m:
+            label = {"a": "откликнулся ", "r": "отказ ", "s": "мимо "}[m["act"]] + m["date"]
+            r["status"] = label  # leaves the top picks
+            r["flags"].insert(0, ("plain" if m["act"] == "a" else "bad", label))
+            r["fit"] = fit_of(r["flags"])
             continue
-        m = by_company.get(r["company"].lower())
-        if m and not r.get("status"):
-            label = ("откликнулся " if m["act"] == "a" else "отказ ") + m["date"]
-            r["status"] = label
-            r["flags"].insert(0, ("bad" if m["act"] == "r" else "plain", label))
+        notes = [(om, ACTIONS[om["act"]]) for ovid, om in by_company.get(r["company"].lower(), []) if ovid != vid]
+        if notes:
+            rejected = any(om["act"] == "r" for om, _ in notes)
+            text = "; ".join(f"{'был отказ' if om['act'] == 'r' else 'ты откликался'}: «{om['name']}», {om['date']}" for om, _ in notes)
+            r["flags"].insert(0, ("warn" if rejected else "plain", "в компании " + text))
             r["fit"] = fit_of(r["flags"])
 
 
