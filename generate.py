@@ -103,18 +103,31 @@ def fit_of(flags):
     return "bad" if "bad" in lv else ("warn" if "warn" in lv else "good")
 
 
-def money(lo, hi, cur, rates, gross=False):
+# Share of a gross salary left after income tax and employee contributions, by currency (rough).
+NET_SHARE = {"BYN": 0.86, "BYR": 0.86, "RUB": 0.87, "RUR": 0.87, "KZT": 0.78, "UZS": 0.88, "KGS": 0.82,
+             "AMD": 0.75, "AZN": 0.83}
+
+
+def pay(lo, hi, cur, rates, gross=False):
+    """Salary as display text plus net USD numbers: lo, hi, top (for the floor check) and mid (for market stats)."""
     if not (lo or hi):
         return "", None
-    cur_s = {"BYR": "BYN", "RUR": "₽", "RUB": "₽", "USD": "$", "EUR": "€"}.get(cur, cur or "")
-    s = (f"{lo:,}–{hi:,}" if lo and hi else (f"от {lo:,}" if lo else f"до {hi:,}")).replace(",", " ") + f" {cur_s}"
+    cur = (cur or "").upper()
+    cur_s = {"BYR": "BYN", "RUR": "₽", "RUB": "₽", "USD": "$", "EUR": "€"}.get(cur, cur)
+    text = (f"{lo:,}–{hi:,}" if lo and hi else (f"от {lo:,}" if lo else f"до {hi:,}")).replace(",", " ") + f" {cur_s}"
     if gross:
-        s += " gross"
-    k = rates.get((cur or "").upper())
-    usd = (hi or lo) * k if k else None
-    if usd and cur != "USD":
-        s += f" ≈ ${round(usd / 50) * 50:,}".replace(",", " ")
-    return s, usd
+        text += " gross"
+    k = rates.get(cur)
+    if not k:
+        return text, None
+    k *= NET_SHARE.get(cur, 0.87) if gross else 1
+    nlo, nhi = (lo * k if lo else None), (hi * k if hi else None)
+    r50 = lambda x: f"{round(x / 50) * 50:,}".replace(",", " ")
+    if cur != "USD" or gross:
+        span = f"{r50(nlo)}–{r50(nhi)}" if nlo and nhi else r50(nlo or nhi)
+        text += f" ≈ ${span}" + (" на руки" if gross else "")
+    mid = (nlo + nhi) / 2 if nlo and nhi else nlo  # "до X" has no reliable middle
+    return text, {"lo": nlo, "hi": nhi, "top": nhi or nlo, "mid": mid}
 
 
 def habr_all(days):
@@ -136,17 +149,17 @@ def habr_all(days):
 
 def normalize_habr(v, rates):
     sal = v.get("salary") or {}
-    salary, usd_hi = money(sal.get("from"), sal.get("to"), sal.get("currency"), rates)
+    salary, money_ = pay(sal.get("from"), sal.get("to"), sal.get("currency"), rates)
     locs = [l["title"] for l in (v.get("locations") or [])]
     name, flags = v["title"].strip(), []
     if not v.get("remoteWork") and HOME_CITY and HOME_CITY not in locs:
         flags.append(("bad", "офис: " + (", ".join(locs) or "?")))
     q = v.get("qualification") or ""
     flags += level_flags(name + " " + q)
-    flags += salary_flags(usd_hi, open_top=not sal.get("to"))
+    flags += salary_flags(money_, open_top=not sal.get("to"))
     return {
         "id": "hb" + str(v["id"]), "name": name, "company": (v.get("company") or {}).get("title", ""),
-        "url": "https://career.habr.com" + v["href"], "salary": salary, "pub": v["publishedDate"]["date"], "created": "",
+        "url": "https://career.habr.com" + v["href"], "salary": salary, "pay": money_, "pub": v["publishedDate"]["date"], "created": "",
         "reposted": False, "city": ", ".join(locs), "region": "habr", "source": "career.habr.com",
         "formats": ["удалёнка"] if v.get("remoteWork") else ["офис"], "exp": q, "emp": "", "flags": flags,
         "fit": fit_of(flags), "responses": None, "test": False, "letter": False,
@@ -228,8 +241,9 @@ def level_flags(title, exp_code=None):
     return ([("good", "middle")] if middle else []) + extra
 
 
-def salary_flags(usd, open_top=False):
-    """Below the floor is excluded only when the whole range is below it; "from X" has no ceiling, so it is a warning."""
+def salary_flags(money_, open_top=False):
+    """Net pay vs the floor. Excluded only when the whole range is below it; "from X" has no ceiling, so it is a warning."""
+    usd = money_ and money_["top"]
     if usd is None:
         return []
     if usd >= MIN_USD:
@@ -336,17 +350,7 @@ def flat(lst, key):
 def normalize(v, region, rates):
     c = v.get("compensation") or {}
     lo, hi, cur = c.get("from"), c.get("to"), c.get("currencyCode")
-    salary, usd_hi = "", None
-    if lo or hi:
-        cur_s = {"BYR": "BYN", "RUR": "₽", "USD": "$", "EUR": "€"}.get(cur, cur or "")
-        salary = (f"{lo:,}–{hi:,}" if lo and hi else (f"от {lo:,}" if lo else f"до {hi:,}")).replace(",", " ") + f" {cur_s}"
-        if c.get("gross"):
-            salary += " gross"
-        k = rates.get(cur)
-        if k:
-            usd_hi = (hi or lo) * k
-            if cur not in ("USD",):
-                salary += f" ≈ ${round((hi or lo) * k / 50) * 50:,}".replace(",", " ")
+    salary, money_ = pay(lo, hi, cur, rates, gross=bool(c.get("gross")))
     langs = [l for l in flat(v.get("languages"), "language")]
     eng = max((LANG_LVL.get(l.get("degree"), 0) for l in langs if l.get("isoCode") == "eng"), default=0)
     eng_lbl = next((l["degree"].upper() for l in langs if l.get("isoCode") == "eng" and LANG_LVL.get(l.get("degree"), 0) == eng), "")
@@ -368,12 +372,12 @@ def normalize(v, region, rates):
     elif eng == LANG_LVL["b1"]:
         flags.append(("warn", "английский B1"))
     flags += level_flags(name, v.get("workExperience"))
-    flags += salary_flags(usd_hi, open_top=not hi)
+    flags += salary_flags(money_, open_top=not hi)
     reposted = bool(created and pub and (pub - created).days >= 2)
     return {
         "id": str(v["vacancyId"]), "name": name, "company": company,
         "url": v.get("links", {}).get("desktop") or f"https://rabota.by/vacancy/{v['vacancyId']}",
-        "salary": salary, "pub": pub.isoformat(), "created": created.isoformat() if created else "",
+        "salary": salary, "pay": money_, "pub": pub.isoformat(), "created": created.isoformat() if created else "",
         "reposted": reposted, "city": city, "region": region, "source": v.get("displayHost") or ("rabota.by" if region == "Беларусь" else "hh.ru"),
         "formats": [FMT.get(f, f) for f in formats], "exp": EXP.get(v.get("workExperience"), ""),
         "emp": EMP.get(v.get("employmentForm"), ""), "flags": flags,
@@ -402,15 +406,7 @@ def getmatch_all():
 def normalize_getmatch(v, rates):
     pub = dt.datetime.fromisoformat(v["published_at"]).replace(tzinfo=dt.timezone.utc)
     lo, hi, cur = v.get("salary_display_from"), v.get("salary_display_to"), v.get("salary_currency")
-    salary, usd_hi = "", None
-    if lo or hi:
-        cur_s = {"RUB": "₽", "USD": "$", "EUR": "€"}.get(cur, cur or "")
-        salary = (f"{lo:,}–{hi:,}" if lo and hi else (f"от {lo:,}" if lo else f"до {hi:,}")).replace(",", " ") + f" {cur_s}"
-        k = rates.get(cur)
-        if k:
-            usd_hi = (hi or lo) * k
-            if cur != "USD":
-                salary += f" ≈ ${round(usd_hi / 50) * 50:,}".replace(",", " ")
+    salary, money_ = pay(lo, hi, cur, rates, gross=v.get("salary_taxes") == "gross")
     locs = [l for l in v.get("location_items") or [] if not l.get("exclude")]
     fmts = {l.get("format") for l in locs}
     labels = ", ".join(dict.fromkeys(l["label"] for l in locs))
@@ -429,11 +425,11 @@ def normalize_getmatch(v, rates):
     elif eng == LANG_LVL["b1"]:
         flags.append(("warn", "английский B1"))
     flags += level_flags(name)
-    flags += salary_flags(usd_hi, open_top=not hi)
+    flags += salary_flags(money_, open_top=not hi)
     fmt_ru = {"remote": "удалёнка", "hybrid": "гибрид", "office": "офис"}
     return {
         "id": "gm" + str(v["id"]), "name": name, "company": (v.get("company") or {}).get("name", ""),
-        "url": "https://getmatch.ru" + v["url"], "salary": salary, "pub": pub.isoformat(), "created": "",
+        "url": "https://getmatch.ru" + v["url"], "salary": salary, "pay": money_, "pub": pub.isoformat(), "created": "",
         "reposted": False, "city": labels, "region": "getmatch", "source": "getmatch.ru",
         "formats": [fmt_ru[f] for f in fmt_ru if f in fmts], "exp": "", "emp": "", "flags": flags,
         "fit": fit_of(flags),
@@ -479,8 +475,7 @@ def pct(xs, q):
 
 
 def usd_of(r):
-    m = re.search(r"≈ \$([\d ]+)", r["salary"]) or re.search(r"([\d ]+) \$", r["salary"].split("–")[-1])
-    return int(m.group(1).replace(" ", "")) if m else None
+    return (r.get("pay") or {}).get("top")
 
 
 def best_picks(rows, n=40):
@@ -503,8 +498,9 @@ def analyze(rows, errors):
     ok = [r for r in rows if r["fit"] != "bad"]
     new = [r for r in rows if r.get("new")]
     new_ok = [r for r in new if r["fit"] != "bad"]
-    paid = [(r, usd_of(r)) for r in rows if usd_of(r)]
-    mid = [u for r, u in paid if not any(f[1] in ("senior", "junior") for f in r["flags"])]
+    paid = [r for r in rows if usd_of(r)]
+    # market stats: middle of the range (or "from X"), net; "up to X" is left out
+    mid = [r["pay"]["mid"] for r in paid if r["pay"].get("mid") and not any(f[1] in ("senior", "junior") for f in r["flags"])]
     by_rows = [r for r in rows if r["source"] == "rabota.by"]
     remote = [r for r in by_rows if "удалёнка" in r["formats"]]
     eng = [r for r in rows if any("английский" in f[1] for f in r["flags"])]
