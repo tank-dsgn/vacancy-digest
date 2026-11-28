@@ -358,5 +358,23 @@
   "remote_share": 12,
   "eng_share": 10,
   "resp_median": 640
+ },
+ {
+  "date": "2026-11-28",
+  "total": 116,
+  "ok": 51,
+  "new": 5,
+  "new_ok": 2,
+  "week": 50,
+  "week_fresh": 24,
+  "reposted_share": 32,
+  "salary_share": 26,
+  "mid_median": 1323,
+  "mid_p25": 974,
+  "mid_p75": 1704,
+  "mid_n": 25,
+  "remote_share": 17,
+  "eng_share": 11,
+  "resp_median": 642
  }
 ]
